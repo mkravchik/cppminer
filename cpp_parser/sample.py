@@ -25,7 +25,7 @@ class Sample:
             Context.validate_sub_token(sub_token)
 
     def __str__(self):
-        str_value = make_str_key(self.key)
+        str_value = self.key #make_str_key(self.key)
         for context in self.contexts:
             str_value += " " + make_str_key(context.start_token)
             str_value += "," + make_str_key(context.path.tokens)

@@ -15,6 +15,8 @@ class DataSetMerge:
         self.samples_db = lmdb.open(os.path.join(self.output_path, 'samples.db'), writemap=True)
         self.samples_db.set_mapsize(map_size)
         self.total_num = 0
+        self.predef_sets = False
+        self.dest_set = []
 
     def merge(self, clear_resources=True):
         functions = set()
@@ -24,15 +26,29 @@ class DataSetMerge:
             files_num = sum(1 for _ in Path(self.output_path).rglob('*.c2s'))
             with tqdm(total=files_num) as pbar:
                 for file_path in Path(self.output_path).rglob('*.c2s'):
-                    with file_path.open() as file:
-                        # print('Loading file: ' + file_path.absolute().as_posix())
-                        for line in file.readlines():
-                            src_mark_str, _, sample_line = line.partition(')')
-                            src_mark = src_mark_str[2:]
-                            if src_mark not in functions:
-                                txn.put(str(sample_id).encode('ascii'), sample_line.encode('ascii'))
-                                sample_id += 1
-                                functions.add(src_mark)
+                    try:
+                        with file_path.open() as file:
+                            # print('Loading file: ' + file_path.absolute().as_posix())
+                            for line in file.readlines():
+                                src_mark_str, _, sample_line = line.partition(')')
+                                src_mark = src_mark_str[2:]
+                                if not self.predef_sets:
+                                    if len(src_mark.split(",")) > 2:
+                                        self.predef_sets = True
+                                if src_mark not in functions:
+                                    if self.predef_sets:
+                                        mark_parts = src_mark.split(",")
+                                        if len(mark_parts) < 3 or mark_parts[2].strip(" '") not in set(["train", "validation", "test"]):
+                                            print("Don't know the dest set, skipping", src_mark)
+                                            continue
+                                        else:
+                                            self.dest_set.append(mark_parts[2].strip(" '"))
+                                    txn.put(str(sample_id).encode('ascii'), sample_line.encode('ascii'))
+                                    sample_id += 1
+                                    functions.add(src_mark)
+
+                    except Exception as e:
+                        print(f"Failed processing {file_path}. Exception {e}")
                     if clear_resources:
                         os.remove(file_path.absolute().as_posix())
                     pbar.update(1)
@@ -53,21 +69,36 @@ class DataSetMerge:
         validation_index = 0
         try:
             with self.samples_db.begin(write=False) as txn:
-                for _ in tqdm(range(self.total_num + 1)):
-                    index = random.randint(0, self.total_num)
-                    while processed[index]:
+                if not self.predef_sets:
+                    for _ in tqdm(range(self.total_num + 1)):
                         index = random.randint(0, self.total_num)
-                    processed[index] = True
-                    sample = txn.get(str(index).encode('ascii'))
-                    if train_index < train_samples_num:
-                        train_file.write(sample.decode('ascii'))
-                        train_index += 1
-                    elif test_index < test_samples_num:
-                        test_file.write(sample.decode('ascii'))
-                        test_index += 1
-                    elif validation_index < test_samples_num:
-                        validation_file.write(sample.decode('ascii'))
-                        validation_index += 1
+                        while processed[index]:
+                            index = random.randint(0, self.total_num)
+                        processed[index] = True
+                        sample = txn.get(str(index).encode('ascii'))
+                        if train_index < train_samples_num:
+                            train_file.write(sample.decode('ascii'))
+                            train_index += 1
+                        elif test_index < test_samples_num:
+                            test_file.write(sample.decode('ascii'))
+                            test_index += 1
+                        elif validation_index < test_samples_num:
+                            validation_file.write(sample.decode('ascii'))
+                            validation_index += 1
+                else:
+                    for index in tqdm(range(self.total_num + 1)):
+                        processed[index] = True
+                        sample = txn.get(str(index).encode('ascii'))
+                        if self.dest_set[index] == 'train':
+                            train_file.write(sample.decode('ascii'))
+                            train_index += 1
+                        elif self.dest_set[index] == 'test':
+                            test_file.write(sample.decode('ascii'))
+                            test_index += 1
+                        elif self.dest_set[index] == 'validation':
+                            validation_file.write(sample.decode('ascii'))
+                            validation_index += 1
+
         finally:
             print("Closing files ...")
             train_file.close()

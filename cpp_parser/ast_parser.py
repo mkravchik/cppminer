@@ -10,6 +10,7 @@ import uuid
 import os
 import re
 import random
+from ClassMap.classMap import mapper
 
 
 def debug_save_graph(func_node, g):
@@ -38,7 +39,7 @@ def tokenize(name, max_subtokens_num):
 
 
 class AstParser:
-    def __init__(self, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, out_path):
+    def __init__(self, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, out_path, input_path):
         self.validate = False
         self.save_buffer_size = 1000
         self.out_path = out_path
@@ -49,6 +50,8 @@ class AstParser:
         self.index = Index.create()
         self.samples = set()
         self.header_only_functions = set()
+        self.class_mapper = mapper("./ClassMap/classMap.json", input_path)
+        self.file_class = {}
 
     def __del__(self):
         self.save()
@@ -77,8 +80,65 @@ class AstParser:
 
         self.__dump_samples()
 
+    def get_ifdefs(self, file_path: str) -> list:
+        """This function extracts the ifdefs from the file
+        Clang does not have any ifdefs defined thus it skips everything under ifdef
+        Alternatively, we could remove the ifdefs, but for that we need to use the parser 
+        that will find the matching #else/#endif and I did not find a way to do it yet.
+        Note: this is a very primitive mechanism as it does not work recursively on the file's includes
+        Args:
+            file_path (_type_): _description_
+        """    
+        # index = clang.cindex.Index.create()
+        # tu = index.parse(file_path, args=['-x', 'c++'])
+        # for x in tu.cursor.get_tokens():
+        #     print (x.kind)
+        #     print ("  " + srcrangestr(x.extent))
+        #     print ("  '" + str(x.spelling) + "'")
+        res = []
+        try:
+            with open(file_path) as src:
+                for line in src.readlines(): 
+                    # taking care of the simple cases
+                    # single line, no conditions
+                    # A proper treatment requires using a proper preprocessor
+                    match = re.findall("#if defined\(([A-Za-z0-9_-]+)\)$", line)
+                    if len(match) == 0:
+                        match = re.findall("#ifdef\(([A-Za-z0-9_-]+)\)$", line)
+                    if len(match) == 0:
+                        match = re.findall("#ifdef\s+([A-Za-z0-9_-]+)\s*$", line)
+                    if len(match):
+                        res.append(match[0])
+        except Exception as e:
+            print(f"Failed parsing {file_path}, error {e}")
+            return res
+
+        return res
+
     def parse(self, compiler_args, file_path=None):
-        ast = self.index.parse(file_path, compiler_args)
+        file_path_ = file_path if file_path is not None else compiler_args[0]
+        if not file_path_ in self.file_class:
+            label, inc_dirs, project, defines, target_set = self.class_mapper.getFileClass(file_path_)
+            self.file_class[file_path_] = (label, inc_dirs, defines, target_set)
+
+        for define in defines:
+            compiler_args.extend(["-D", define])
+        expected_defines = set(self.get_ifdefs(file_path_))
+        for define in expected_defines:
+            compiler_args.extend(["-D", define])
+
+        # print(args)
+
+        if inc_dirs is not None:
+            for inc in inc_dirs:
+                compiler_args.extend(["-I", inc])
+
+        try:
+            ast = self.index.parse(file_path, compiler_args)
+        except Exception as e:
+            print(f"Failed parsing {file_path}, error {e}")
+            return
+
         self.__parse_node(ast.cursor)
 
     def __dump_samples(self):
@@ -106,7 +166,7 @@ class AstParser:
 
             # detect header only function duplicates
             file_name = func_node.location.file.name
-            source_mark = (file_name, func_node.extent.start.line)
+            source_mark = (file_name, func_node.extent.start.line, self.file_class[file_name][-1])
             if file_name.endswith('.h') and func_node.is_definition:
                 # print('Header only function: {0}'.format(func_node.displayname))
                 if source_mark in self.header_only_functions:
@@ -115,7 +175,8 @@ class AstParser:
                 else:
                     self.header_only_functions.add(source_mark)
 
-            key = tokenize(func_node.spelling, self.max_subtokens_num)
+            # key = tokenize(func_node.spelling, self.max_subtokens_num)
+            key = self.file_class[file_name][0]
             g = ast_to_graph(func_node, self.max_ast_depth)
 
             # debug_save_graph(func_node, g)
@@ -150,7 +211,7 @@ class AstParser:
                 if len(contexts) > self.max_contexts_num:
                     break
 
-            if len(contexts) > 0:
+            if len(contexts) > 0 and key != "Unknown":
                 sample = Sample(key, contexts, source_mark, self.validate)
                 self.samples.add(sample)
         except Exception as e:
