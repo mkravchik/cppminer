@@ -101,6 +101,9 @@ def get_id():
     node_id = uuid.uuid1()
     return node_id.int
 
+# Adding a function to make sure we remember to pass the location
+def add_graph_node(graph, node_id, label, is_reserved, source_line):
+    graph.add_node(node_id, label=label, is_reserved=is_reserved, loc=source_line)    
 
 def add_node(ast_node, graph):
     try:
@@ -115,7 +118,7 @@ def add_node(ast_node, graph):
             op_name = get_operator(ast_node)
             kind = kind.strip() + "_" + "_".join(op_name)
 
-        graph.add_node(node_id, label=kind, is_reserved=True)
+        add_graph_node(graph, node_id, label=kind, is_reserved=True, source_line=ast_node.extent.start.line)
 
         # print("Cursor kind : {0}".format(kind))
         if ast_node.kind.is_declaration():
@@ -134,25 +137,25 @@ def add_node(ast_node, graph):
             raise Exception(msg)
 
 
-def add_child(graph, parent_id, name, is_reserved=True):
+def add_child(graph, parent_id, name, is_reserved=True, source_line=0):
     child_id = get_id()
     assert len(name) > 0, "Missing node name"
-    graph.add_node(child_id, label=name, is_reserved=is_reserved)
+    add_graph_node(graph, child_id, label=name, is_reserved=is_reserved, source_line=source_line)
     graph.add_edge(parent_id, child_id)
 
 
-def add_intermediate_node(graph, parent_id, name):
+def add_intermediate_node(graph, parent_id, name, source_line):
     child_id = get_id()
     assert len(name) > 0, "Missing node name"
-    graph.add_node(child_id, label=name, is_reserved=True)
+    add_graph_node(graph, child_id, label=name, is_reserved=True, source_line=source_line)
     graph.add_edge(parent_id, child_id)
     return child_id
 
 
 def add_call_expr(parent_id, ast_node, graph):
     expr_type = ast_node.type.spelling
-    expr_type_node_id = add_intermediate_node(graph, parent_id, "EXPR_TYPE")
-    add_child(graph, expr_type_node_id, expr_type, is_reserved=False)
+    expr_type_node_id = add_intermediate_node(graph, parent_id, "EXPR_TYPE", source_line=ast_node.extent.start.line)
+    add_child(graph, expr_type_node_id, expr_type, is_reserved=False, source_line=ast_node.extent.start.line)
 
 
 def fix_cpp_operator_spelling(op_name):
@@ -205,19 +208,19 @@ def add_reference(parent_id, ast_node, graph):
         name = ast_node.spelling
         is_reserved = False
 
-    add_child(graph, parent_id, name, is_reserved)
+    add_child(graph, parent_id, name, is_reserved, source_line=ast_node.extent.start.line)
     # print("\tName : {0}".format(name))
 
 
 def add_literal(parent_id, ast_node, graph):
     if ast_node.kind in [CursorKind.STRING_LITERAL,
                          CursorKind.CHARACTER_LITERAL]:
-        add_child(graph, parent_id, 'STRING_VALUE', is_reserved=True)
+        add_child(graph, parent_id, 'STRING_VALUE', is_reserved=True, source_line=ast_node.extent.start.line)
     else:
         token = next(ast_node.get_tokens(), None)
         if token:
             value = token.spelling
-            add_child(graph, parent_id, value)
+            add_child(graph, parent_id, value, source_line=ast_node.extent.start.line)
             # print("\tValue : {0}".format(value))
 
 
@@ -227,21 +230,24 @@ def add_declaration(parent_id, ast_node, graph):
         is_func = True
         return_type = ast_node.type.get_result().spelling
         if len(return_type) > 0:
-            return_type_node_id = add_intermediate_node(graph, parent_id, "RETURN_TYPE")
-            add_child(graph, return_type_node_id, return_type, is_reserved=False)
+            # TODO - is this code correct? I'm not sure what is added here
+            return_type_node_id = add_intermediate_node(graph, parent_id, "RETURN_TYPE", source_line=ast_node.extent.start.line)
+            add_child(graph, return_type_node_id, return_type, is_reserved=False, source_line=ast_node.extent.start.line)
     else:
         declaration_type = ast_node.type.spelling
         if len(declaration_type) > 0:
-            declaration_type_node_id = add_intermediate_node(graph, parent_id, "DECLARATION_TYPE")
-            add_child(graph, declaration_type_node_id, declaration_type, is_reserved=False)
+            # TODO - is this code correct? I'm not sure what is added here
+            declaration_type_node_id = add_intermediate_node(graph, parent_id, "DECLARATION_TYPE", source_line=ast_node.extent.start.line)
+            add_child(graph, declaration_type_node_id, declaration_type, is_reserved=False, source_line=ast_node.extent.start.line)
             # print("\tDecl type : {0}".format(declaration_type))
 
     if not is_template_parameter(ast_node):
         is_reserved = False
         # we skip function names to prevent over-fitting in the code2seq learning tasks
         if is_func:
-            name = "FUNCTION_NAME"
-            is_reserved = True
+            # name = "FUNCTION_NAME"
+            # is_reserved = True
+            name = ast_node.spelling
         else:
             name = ast_node.spelling
 
@@ -250,9 +256,9 @@ def add_declaration(parent_id, ast_node, graph):
             name = ast_node.kind.name + "_UNNAMED"
             is_reserved = True
 
-        name_node_id = add_intermediate_node(graph, parent_id, "DECLARATION_NAME")
+        name_node_id = add_intermediate_node(graph, parent_id, "DECLARATION_NAME", source_line=ast_node.extent.start.line)
 
-        add_child(graph, name_node_id, name, is_reserved=is_reserved)
+        add_child(graph, name_node_id, name, is_reserved=is_reserved, source_line=ast_node.extent.start.line)
         # print("\tName : {0}".format(name))
 
 
@@ -288,9 +294,15 @@ def ast_to_graph(ast_start_node, max_depth):
 
                     if not func_name:
                         func_name = "FUNCTION_CALL"
-                    func_name = re.sub(r'\s+|,+', '', func_name)
+                    # func_name = re.sub(r'\s+|,+', '', func_name)
+                    func_name = re.sub(r'\s+|,+', '_', func_name)
 
-                    call_expr_id = add_intermediate_node(g, node_id, func_name)
+                    # The original code added an intermediate node for the function and added 
+                    # parameters underneath it. This resulted in the function name never appearing as a token
+                    call_expr_id = add_intermediate_node(g, node_id, func_name, source_line=ast_node.extent.start.line)
+
+                    # Instead, I will in addition add a child with the function name
+                    add_child(g, node_id, func_name, is_reserved=False, source_line=ast_node.extent.start.line)
                     node_id = call_expr_id
             else:
                 node_id = parent_id

@@ -73,6 +73,20 @@ def main():
                              help='path to libclang.so file',
                              required=False)
 
+    args_parser.add_argument('-w', '--window',
+                             metavar='window',
+                             type=int,
+                             help='window of code snippet (0 - entire function)',
+                             default=0,
+                             required=False)
+
+    args_parser.add_argument('-ws', '--window_step',
+                             metavar='window-step',
+                             type=int,
+                             help='the step of window for code snippets (0 - same as window)',
+                             default=0,
+                             required=False)
+
     args = args_parser.parse_args()
 
     if args.libclang:
@@ -100,11 +114,17 @@ def main():
     output_path = Path(args.OutPath).resolve().as_posix()
     print('Output path: ' + output_path)
 
+    window = args.window
+    print('Window: ' + str(window))
+
+    window_step = args.window_step
+    print('Window step: ' + str(window_step))
+
     print("Parsing files ...")
     tasks = multiprocessing.JoinableQueue()
     if parallel_processes_num == 1:
         parser = ParserProcess(tasks, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, input_path,
-                               output_path)
+                               output_path, window, window_step)
         for file_path in files(input_path):
             print("Parsing : " + file_path)
             tasks.put(file_path)
@@ -113,7 +133,7 @@ def main():
         tasks.join()
     else:
         processes = [ParserProcess(tasks, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, input_path,
-                                   output_path)
+                                   output_path, window, window_step)
                      for _ in range(parallel_processes_num)]
         for p in processes:
             p.start()

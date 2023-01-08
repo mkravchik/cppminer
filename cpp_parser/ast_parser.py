@@ -39,7 +39,7 @@ def tokenize(name, max_subtokens_num):
 
 
 class AstParser:
-    def __init__(self, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, out_path, input_path):
+    def __init__(self, max_contexts_num, max_path_len, max_subtokens_num, max_ast_depth, out_path, input_path, window=0, step=0):
         self.validate = False
         self.save_buffer_size = 1000
         self.out_path = out_path
@@ -52,6 +52,8 @@ class AstParser:
         self.header_only_functions = set()
         self.class_mapper = mapper("./ClassMap/classMap.json", input_path)
         self.file_class = {}
+        self.window = window
+        self.step = step
 
     def __del__(self):
         self.save()
@@ -177,48 +179,87 @@ class AstParser:
 
             # key = tokenize(func_node.spelling, self.max_subtokens_num)
             key = self.file_class[file_name][0]
+            if key == "Unknown":
+                return # don't waste time
+
             g = ast_to_graph(func_node, self.max_ast_depth)
 
-            # debug_save_graph(func_node, g)
-
             terminal_nodes = [node for (node, degree) in g.degree() if degree == 1]
-            random.shuffle(terminal_nodes)
+            # all_nodes = [node for node in g.nodes()]
+            used_nodes = terminal_nodes # all_nodes
+            random.shuffle(used_nodes)
 
-            contexts = set()
-            ends = combinations(terminal_nodes, 2)
+            # if (file_name.find("ccm.c") > 0):
+            #     debug_save_graph(func_node, g)
+            #     print(file_name, func_node.displayname)
+            #     nodes = []
+            #     for (node, degree) in g.degree():
+            #         if degree == 1:
+            #             nodes.append((g.nodes[node]['label'], g.nodes[node]['loc']))
+            #     sorted_nodes = sorted(nodes, key=lambda a: a[1])
+            #     print(sorted_nodes)
 
-            for start, end in ends:
-                path = shortest_path(g, start, end)
-                if path:
-                    if self.max_path_len != 0 and len(path) > self.max_path_len:
-                        continue  # skip too long paths
-                    path = path[1:-1]
-                    start_node = g.nodes[start]['label']
-                    tokenize_start_node = not g.nodes[start]['is_reserved']
-                    end_node = g.nodes[end]['label']
-                    tokenize_end_node = not g.nodes[end]['is_reserved']
+            # if a window is specified, we need to create number of samples for this function
+            windows = []
+            if self.window:
+                step = self.step if self.step != 0 else self.window
+                w_start = func_node.extent.start.line
+                while w_start < func_node.extent.end.line:
+                    windows.append((w_start, w_start + self.window))
+                    w_start += step
+            else:
+                windows.append((func_node.extent.start.line, func_node.extent.end.line))
 
-                    path_tokens = []
-                    for path_item in path:
-                        path_node = g.nodes[path_item]['label']
-                        path_tokens.append(path_node)
+            for window in windows:
+                # print(f"processing window {window}")
+                contexts = set()
+                source_mark = (file_name, window[0], self.file_class[file_name][-1])
+                ends = combinations(used_nodes, 2) # we want to create the full set each time
+                for start, end in ends:
+                    # print(f"start {g.nodes[start]['label']} {g.nodes[start]['loc']}, end {g.nodes[end]['label']} {g.nodes[end]['loc']},")
+                    if g.nodes[start]['loc'] >= window[0] and g.nodes[start]['loc'] < window[1] and \
+                       g.nodes[end]['loc'] >= window[0] and g.nodes[end]['loc'] < window[1]:
+                        path = shortest_path(g, start, end)
+                        if path:
+                            # print(f"path {path}")
+                            if self.max_path_len != 0 and len(path) > self.max_path_len:
+                                continue  # skip too long paths
+                            path = path[1:-1]
+                            start_node = g.nodes[start]['label']
+                            tokenize_start_node = not g.nodes[start]['is_reserved']
+                            end_node = g.nodes[end]['label']
+                            tokenize_end_node = not g.nodes[end]['is_reserved']
 
-                    context = Context(
-                        tokenize(start_node, self.max_subtokens_num) if tokenize_start_node else [start_node],
-                        tokenize(end_node, self.max_subtokens_num) if tokenize_end_node else [end_node],
-                        Path(path_tokens, self.validate), self.validate)
-                    contexts.add(context)
-                if len(contexts) > self.max_contexts_num:
-                    break
+                            path_tokens = []
+                            for path_item in path:
+                                path_node = g.nodes[path_item]['label']
+                                path_tokens.append(path_node)
 
-            if len(contexts) > 0 and key != "Unknown":
-                sample = Sample(key, contexts, source_mark, self.validate)
-                self.samples.add(sample)
+                            context = Context(
+                                tokenize(start_node, self.max_subtokens_num) if tokenize_start_node else [start_node],
+                                tokenize(end_node, self.max_subtokens_num) if tokenize_end_node else [end_node],
+                                Path(path_tokens, self.validate), self.validate)
+                            contexts.add(context)
+                        else:
+                            # print("no path")
+                            pass
+                        if len(contexts) > self.max_contexts_num:
+                            break
+
+                if len(contexts) > 0:
+                    sample = Sample(key, contexts, source_mark, self.validate)
+                    self.samples.add(sample)
+                    # print(f"Added {len(contexts)} contexts for window {window} for source mark {source_mark} {func_node.displayname, func_node.extent.start.line, func_node.extent.end.line}")
+                else:
+                    # print(f"No contexts for window {window} for source mark {source_mark} {func_node.displayname, func_node.extent.start.line, func_node.extent.end.line}")
+                    pass
+
         except Exception as e:
             # skip unknown cursor exceptions
             if 'Unknown template argument kind' not in str(e):
-                print('Failed to parse function : ')
-                print('Filename : ' + func_node.location.file.name)
-                print('Start {0}:{1}'.format(func_node.extent.start.line, func_node.extent.start.column))
-                print('End {0}:{1}'.format(func_node.extent.end.line, func_node.extent.end.column))
-                print(e)
+                # print('Failed to parse function : ')
+                # print('Filename : ' + func_node.location.file.name)
+                # print('Start {0}:{1}'.format(func_node.extent.start.line, func_node.extent.start.column))
+                # print('End {0}:{1}'.format(func_node.extent.end.line, func_node.extent.end.column))
+                # print(e)
+                pass
